@@ -1,0 +1,275 @@
+parameters:
+  - name: environment_tag
+    type: string
+
+  - name: use_selfhosted
+    default: false
+    type: boolean
+
+  - name: bcaPool
+    type: string
+
+  - name: hostedImage
+    type: string
+
+  - name: tf_loglevel
+    type: string
+
+jobs:
+  - job: ${{ parameters.environment_tag}}_plan
+    timeoutInMinutes: 0
+    variables:
+      - name: environment_tag
+        value: ${{ parameters.environment_tag}}
+      - name: use_selfhosted
+        value: ${{ parameters.use_selfhosted }}
+      - template: ../iac_templates/variables.yml
+        parameters:
+          environment_tag: ${{parameters.environment_tag}}
+    displayName: ${{ parameters.environment_tag}}_plan
+    pool:
+      ? ${{ if or( eq(parameters.use_selfhosted, true), eq(variables.use_selfhosted, 'true')  ) }}
+      : name: "${{ parameters.bcaPool }}"
+      ? ${{ if and( eq(parameters.use_selfhosted, false), eq(variables.use_selfhosted, 'false') ) }}
+      : vmimage: "${{ parameters.hostedImage }}"
+    steps:
+      - checkout: self
+        condition: succeededOrFailed()
+        displayName: "Checkout main repo"
+        fetchDepth: 0
+        fetchTags: true
+        persistCredentials: true
+
+      #- task: PowerShell@2
+      #  condition: succeededOrFailed()
+      #  displayName: Set Terraform Environment Variables
+      #  inputs:
+      #    filePath: "$(System.DefaultWorkingDirectory)/repo_template/build/scripts/set_tf_env_vars.ps1"
+
+      - task: PowerShell@2
+        displayName: "Inject GitHub PAT into module source URLs"
+        inputs:
+          filePath: "$(System.DefaultWorkingDirectory)/repo_template/build/scripts/inject_github_pat.ps1"
+          arguments: "-githubpat $(github-pat)"
+          failOnStderr: true
+          showWarnings: true
+          pwsh: true
+          workingDirectory: "$(system.defaultworkingdirectory)"
+
+      #- task: PowerShell@2
+      #  displayName: "Inject GitHub PAT into module source URLs"
+      #  inputs:
+      #    arguments: "-githubpat $(github-pat)"
+      #    filePath: "$(repo_name)/repo_template/build/scripts/inject_github_pat.ps1"
+      #    workingdirectory: $(system.defaultworkingdirectory)/$(tfdir)
+
+      - task: TerraformInstaller@1
+        condition: succeededOrFailed()
+        displayName: "Install terraform version $(terraform_installer_version)"
+        enabled: true
+        inputs:
+          terraformVersion: "$(terraform_installer_version)"
+
+      - task: terraformTask@5
+        condition: succeeded()
+        name: terraformPlanInit_${{ parameters.environment_tag }}
+        displayName: "terraform init"
+        env:
+          TF_IN_AUTOMATION: true
+          TF_IGNORE: "trace"
+          TF_INPUT: 0
+          TF_LOG: ${{ parameters.tf_loglevel }}
+          TF_LOG_PATH: $(System.DefaultWorkingDirectory)/terraform_init.log
+          TF_VAR_AZDO_PERSONAL_ACCESS_TOKEN: $(azdo_pat)
+          TF_VAR_AZDO_ORG_SERVICE_URL: $(azdo_orgurl)
+          TF_WORKSPACE: "default"
+        inputs:
+          provider: "azurerm"
+          command: "init"
+          backendServiceArm: ${{ variables.subscription_connection}}
+          backendAzureRmResourceGroupName: "$(resource-group)"
+          backendAzureRmStorageAccountName: "$(storage-account)"
+          backendAzureRmContainerName: $(container-name)
+          backendAzureRmKey: "$(state-key)"
+          workingDirectory: $(system.DefaultWorkingDirectory)/$(tfdir)
+
+      # - task: PowerShell@2
+      #   displayName: Check Terraform init log
+      #   condition: succeededOrFailed()
+      #   inputs:
+      #     filePath: "$(System.DefaultWorkingDirectory)/repo_template/build/scripts/terraform_log_checker.ps1"
+      #     arguments: "-LogName $(System.DefaultWorkingDirectory)/terraform_init.log -variableName TfInitLogExists"
+
+      - task: PublishPipelineArtifact@1
+        condition: |
+          and(
+          succeededOrFailed(),
+          eq(variables['TfInitLogExists'], 'true')
+          )
+        continueOnError: true
+        displayName: "Publish terraform init log for $(environment_tag)"
+        enabled: true
+        inputs:
+          path: $(System.DefaultWorkingDirectory)/terraform_init.log
+          artifact: $(environment_tag)_Terraform_init_log
+
+      - task: terraformTask@5
+        name: terraformplanvalidate${{ parameters.environment_tag }}
+        condition: succeeded()
+        displayName: "terraform validate"
+        env:
+          TF_IN_AUTOMATION: true
+          TF_IGNORE: "trace"
+          TF_INPUT: 0
+          TF_LOG: ${{ parameters.tf_loglevel }}
+          TF_LOG_PATH: $(System.DefaultWorkingDirectory)/terraform_validate.log
+          TF_VAR_AZDO_PERSONAL_ACCESS_TOKEN: $(azdo_pat)
+          TF_VAR_AZDO_ORG_SERVICE_URL: $(azdo_orgurl)
+          TF_WORKSPACE: "default"
+        inputs:
+          provider: "azurerm"
+          command: "validate"
+          workingDirectory: $(system.DefaultWorkingDirectory)/$(tfdir)
+          environmentServiceNameAzureRM: ${{ variables.subscription_connection}}
+
+      # - task: PowerShell@2
+      #   displayName: Check Terraform Validate log
+      #   condition: succeededOrFailed()
+      #   inputs:
+      #     filePath: "$(System.DefaultWorkingDirectory)/repo_template/build/scripts/terraform_log_checker.ps1"
+      #     arguments: "-LogName $(System.DefaultWorkingDirectory)/terraform_validate.log -variableName TfValidateLogExists"
+
+      - task: PublishPipelineArtifact@1
+        condition: |
+          and(
+          succeededOrFailed(),
+          eq(variables['TfValidateLogExists'], 'true')
+          )
+        continueOnError: true
+        displayName: "Publish terraform validate log for $(environment_tag)"
+        enabled: true
+        inputs:
+          path: $(System.DefaultWorkingDirectory)/terraform_validate.log
+          artifact: $(environment_tag)_Terraform_validate_log
+
+      - task: terraformTask@5
+        name: terraformPlan${{ parameters.environment_tag }}
+        condition: succeeded()
+        displayName: "terraform plan"
+        env:
+          TF_IN_AUTOMATION: true
+          TF_IGNORE: "trace"
+          TF_INPUT: 0
+          TF_LOG: ${{ parameters.tf_loglevel }}
+          TF_LOG_PATH: $(System.DefaultWorkingDirectory)/terraform_plan.log
+          TF_VAR_AZDO_PERSONAL_ACCESS_TOKEN: $(azdo_pat)
+          TF_VAR_AZDO_ORG_SERVICE_URL: $(azdo_orgurl)
+          TF_WORKSPACE: "default"
+        inputs:
+          provider: "azurerm"
+          command: "plan"
+          commandOptions: "
+            -out=plan_$(environment_tag)
+            -var-file=environment/default.tfvars
+            -var-file=environment/$(environment_tag)/variables.tfvars
+            -generate-config-out=generated_resources.tf
+            "
+          workingDirectory: $(system.DefaultWorkingDirectory)/$(tfdir)
+          environmentServiceNameAzureRM: ${{ variables.subscription_connection}}
+
+      - task: PowerShell@2
+        displayName: Check Terraform Plan log
+        condition: succeededOrFailed()
+        inputs:
+          filePath: "$(System.DefaultWorkingDirectory)/repo_template/build/scripts/terraform_log_checker.ps1"
+          arguments: "-LogName $(System.DefaultWorkingDirectory)/terraform_plan.log -variableName TfPlanLogExists"
+
+      - task: PublishPipelineArtifact@1
+        condition: |
+          and(
+          succeededOrFailed(),
+          eq(variables['TfPlanLogExists'], 'true')
+          )
+        continueOnError: true
+        displayName: "Publish terraform plan log for $(environment_tag)"
+        enabled: true
+        inputs:
+          path: $(System.DefaultWorkingDirectory)/terraform_plan.log
+          artifact: $(environment_tag)_Terraform_plan_log
+
+      - task: PublishPipelineArtifact@1
+        condition: |
+          and(
+          succeededOrFailed(),
+          eq(variables['TfPlanLogExists'], 'true')
+          )
+        continueOnError: true
+        displayName: "Publish terraform plan for $(environment_tag)"
+        enabled: true
+        inputs:
+          path: $(System.DefaultWorkingDirectory)/$(tfdir)/plan_$(environment_tag)
+          artifact: plan_$(environment_tag)
+
+      - task: PowerShell@2
+        displayName: check if generated_resources.tf exists
+        condition: succeededOrFailed()
+        inputs:
+          filePath: "$(System.DefaultWorkingDirectory)/repo_template/build/scripts/check_for_generated_terraform.ps1"
+          arguments: "-tfDir $(System.DefaultWorkingDirectory)/$(tfdir) -variableName GeneratedTfExists"
+
+      - task: PublishPipelineArtifact@1
+        condition: |
+          and(
+          succeededOrFailed(),
+          eq(variables['GeneratedTfExists'], 'true')
+          )
+        continueOnError: true
+        displayName: "Publish imported terraform for $(environment_tag)"
+        enabled: true
+        inputs:
+          path: $(System.DefaultWorkingDirectory)/$(tfdir)/generated_resources.tf
+          artifact: "$(environment_tag) imported resources"
+
+      - task: terraformTask@5
+        condition: succeeded()
+        displayName: "terraform show"
+        env:
+          TF_IN_AUTOMATION: true
+          TF_IGNORE: "trace"
+          TF_INPUT: 0
+          TF_LOG: ${{ parameters.tf_loglevel }}
+          TF_LOG_PATH: $(System.DefaultWorkingDirectory)/terraform_show.log
+          TF_VAR_AZDO_PERSONAL_ACCESS_TOKEN: $(azdo_pat)
+          TF_VAR_AZDO_ORG_SERVICE_URL: $(azdo_orgurl)
+          TF_WORKSPACE: "default"
+        inputs:
+          provider: "azurerm"
+          command: "show"
+          commandOptions: "
+            -no-color
+            $(System.DefaultWorkingDirectory)/$(TfDir)/plan_$(environment_tag)
+            "
+          outputTo: "file"
+          outputFormat: "default"
+          fileName: "$(System.DefaultWorkingDirectory)/$(TfDir)/show_$(environment_tag).txt"
+          workingDirectory: $(system.DefaultWorkingDirectory)/$(tfdir)
+          environmentServiceNameAzureRM: ${{ variables.subscription_connection}}
+
+      - task: PowerShell@2
+        condition: |
+          and(
+          succeededOrFailed(),
+          eq(variables['Build.Reason'], 'PullRequest')
+          )
+        displayName: Post PR comment
+        inputs:
+          filePath: "$(System.DefaultWorkingDirectory)/repo_template/build/scripts/pull_request_comment_terraform.ps1"
+        env:
+          ENVIRONMENT_TAG: $(environment_tag)
+          SYSTEM_COLLECTION_URI: $(System.CollectionUri)
+          SYSTEM_ACCESS_TOKEN: $(System.AccessToken)
+          SYSTEM_PULL_REQUEST_ID: $(System.PullRequest.PullRequestId)
+          SYSTEM_TEAM_PROJECT: $(System.TeamProject)
+          SYSTEM_BUILD_REPOSITORY_ID: $(Build.Repository.ID)
+          SYSTEM_BUILD_ID: $(Build.BuildId)
+          SHOW_LOCATION: $(System.DefaultWorkingDirectory)/$(tfdir)/show_$(environment_tag).txt

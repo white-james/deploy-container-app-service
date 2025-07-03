@@ -1,0 +1,165 @@
+name:
+  AllinOne-$(Date:yy)-$(Date:MM)-$(Date:dd).$(Rev:r)
+
+  #pull request set to ignore all branches to allow it to be triggered by validation policies
+pr:
+  branches:
+    exclude:
+      - "*"
+
+    #include:
+    #  - "main"
+  #paths:
+  #include:
+  #  - "*"
+# trigger set to build all standard branches and ignore everything else
+trigger:
+  batch: true
+  branches:
+    include:
+      - "bug/*"
+      - "development/*"
+      - "feature/*"
+      - "hotfix/*"
+      - "main"
+      - "release/*"
+  paths:
+    include:
+      #- "*"
+      - "**/$(tfdir)/**"
+      - "**/.azuredevops/project_specific_variables.yml"
+      - "**/repo_template/**"
+    #exclude:
+    #- "*"
+
+schedules:
+  - cron: "0 0 * * *"
+    displayName: Daily All In One run
+    batch: true
+    # run even when there are no code changes
+    always: true
+    # run only on these branches
+    branches:
+      include:
+        #- "bug/*"
+        #- "development/*"
+        #- "feature/*"
+        #- "hotfix/*"
+        - "main"
+        #- "release/*"
+
+parameters:
+  - name: "environment_tags"
+    type: object
+    default: ["dev", "uat", "prod"]
+
+  # use this to define the microsoft hosted agent pool you wish to use
+  - name: hostedImage
+    displayName: Microsoft-Hosted Agent Image
+    type: string
+    default: ubuntu-latest
+    values:
+      - macOS-13 # macOS 13 Ventura
+      - macOS-14 # macOS 14 Sonoma
+      - macOS-15 # macOS 15 Sequoia (preview)
+      - macos-latest # macOS latest is currently macOS-14
+      - ubuntu-22.04 # Ubuntu 22.04 LTS
+      - ubuntu-24.04 # Ubuntu 24.04 LTS
+      - ubuntu-latest # latest Ubuntu LTS is currently 22.04
+      - windows-2019 # Windows Server 2019
+      - windows-2022 # Windows Server 2022
+      - windows-2025 # Windows Server 2025 with Visual Studio 2022 (preview)
+      - windows-latest # latest Windows Server is currently 2022
+
+  # use this to define the selfhosted agent pool you wish to use
+  - name: bcaPool
+    displayName: Self-Hosted Agent Pool
+    type: string
+    default: bca-linux-pool
+    values:
+      - bca-linux-pool # Production Ubuntu self-hosted agent pool
+      - bca-uat-linux-pool # UAT Ubuntu self-hosted agent pool use only when advised by the Platform team
+      - bca-uat-windows-pool # UAT Windows self-hosted agent pool use only when advised by the Platform team
+      - bca-windows-pool # Production Windows self-hosted agent pool
+      - Default
+      - OnPremise - Europe IT
+      - OnPremise - Integration
+      - OnPremise - macOS
+      - OnPremise - Windows 10 Testing
+
+  # use this to make all stages use the self hosted agent pool
+  - name: use_selfhosted
+    displayName: Use Self-Hosted Agents?
+    type: boolean
+    default: false
+
+  # infrastructure switches # these switches allow the terraform specific steps to run
+
+  - name: run_tfplan
+    displayName: Run Terraform Plan?
+    type: boolean
+    default: true
+
+  - name: run_tfapply
+    displayName: Run Terraform Apply?
+    type: boolean
+    default: true
+
+  - name: run_tfdestroy
+    displayName: Run Terraform Destroy?
+    type: boolean
+    default: false
+
+variables:
+  - ${{each environment_tag in parameters.environment_tags}}:
+      - template: variables.yml
+
+lockBehavior: sequential
+
+stages:
+
+  - stage: plan
+    # the below condition will only run the terraform plan stage if the build is not a PR or a scheduled build
+    condition: |
+      and(
+      succeededOrFailed(),
+      eq(${{ parameters.run_tfplan }}, true),
+      not(
+      or(
+      eq(variables['Build.Reason'], 'PullRequest'),
+      eq(variables['Build.Reason'], 'Schedule')
+      )
+      )
+      )
+    dependsOn:
+    displayName: "TF plan"
+    jobs:
+      - ${{ each environment_tag in parameters.environment_tags }}:
+          - template: terraform_plan.yml
+            parameters:
+              bcaPool: "${{ parameters.bcaPool }}"
+              environment_tag: ${{ environment_tag}}
+              hostedImage: "${{ parameters.hostedImage }}"
+              tf_loglevel: ${{ parameters.tf_loglevel }}
+              use_selfhosted: ${{ parameters.use_selfhosted }}
+
+  - template: terraform_apply.yml
+    parameters:
+      bcaPool: "${{ parameters.bcaPool }}"
+      environment_tags: "${{ parameters.environment_tags }}"
+      gitTag: "${{ parameters.gitTag }}"
+      gitMessage: "${{ parameters.gitMessage }}"
+      hostedImage: "${{ parameters.hostedImage }}"
+      run_tfapply: "${{ parameters.run_tfapply }}"
+      tf_loglevel: "${{ parameters.tf_loglevel }}"
+      use_selfhosted: ${{ parameters.use_selfhosted }}
+
+  - template: terraform_destroy.yml
+    parameters:
+      bcaPool: "${{ parameters.bcaPool }}"
+      environment_tags: "${{ parameters.environment_tags }}"
+      hostedImage: "${{ parameters.hostedImage }}"
+      run_tfapply: "${{ parameters.run_tfapply }}"
+      run_tfdestroy: "${{ parameters.run_tfdestroy }}"
+      tf_loglevel: "${{ parameters.tf_loglevel }}"
+      use_selfhosted: ${{ parameters.use_selfhosted }}
