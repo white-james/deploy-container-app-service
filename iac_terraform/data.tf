@@ -7,3 +7,5 @@ data "azurerm_subscription" "this" {
 
 data "azurerm_client_config" "current" {
 }
+
+# This data source is used to get the current tenant id.
